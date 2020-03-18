@@ -36,19 +36,17 @@ flags.DEFINE_string(
 MAX_SEQ_LENGTH = 512
 
 def serving_input_fn():
-  feature_spec = {
-      "input_ids" : tf.FixedLenFeature([MAX_SEQ_LENGTH], tf.int64),
-      "input_mask" : tf.FixedLenFeature([MAX_SEQ_LENGTH], tf.int64),
-      "segment_ids" : tf.FixedLenFeature([MAX_SEQ_LENGTH], tf.int64),
-      "label_ids" :  tf.FixedLenFeature([], tf.int64)
-
-  }
-  serialized_tf_example = tf.placeholder(dtype=tf.string,
-                                         shape=[None],
-                                         name='input_example_tensor')
-  receiver_tensors = {'example': serialized_tf_example}
-  features = tf.parse_example(serialized_tf_example, feature_spec)
-  return tf.estimator.export.ServingInputReceiver(features, receiver_tensors)
+    """An input receiver that expects a serialized tf.Example."""
+    reciever_tensors = {
+        "input_ids": tf.placeholder(dtype=tf.int64,shape=[1, MAX_SEQ_LENGTH])
+    }
+    features = {
+        "input_ids": reciever_tensors['input_ids'],
+        "input_mask": 1 - tf.cast(tf.equal(reciever_tensors['input_ids'], 0), dtype=tf.int64),
+        "segment_ids": tf.zeros(dtype=tf.int64,shape=[1, FLAGS.max_seq_length]),
+        'label_ids': tf.zeros(dtype=tf.int64, shape=[1, 1])
+    }
+    return tf.estimator.export.ServingInputReceiver(features, reciever_tensors)
 
 def create_model(is_training, input_ids, input_mask, segment_ids, labels,
                  num_labels, bert_hub_module_handle):
@@ -91,11 +89,12 @@ def create_model(is_training, input_ids, input_mask, segment_ids, labels,
     logits = tf.nn.bias_add(logits, output_bias)
     probabilities = tf.nn.softmax(logits, axis=-1)
     # log_probs = tf.nn.log_softmax(logits, axis=-1)
+    log_probs = tf.log(tf.clip_by_value(probabilities,1e-8,1.0))
 
     one_hot_labels = tf.one_hot(labels, depth=num_labels, dtype=tf.float32)
 
-    per_example_loss = tf.losses.softmax_cross_entropy(one_hot_labels, logits)
-    # per_example_loss = -tf.reduce_sum(one_hot_labels * log_probs, axis=-1)
+    # per_example_loss = tf.losses.softmax_cross_entropy(one_hot_labels, logits)
+    per_example_loss = -tf.reduce_sum(one_hot_labels * log_probs, axis=-1)
     loss = tf.reduce_mean(per_example_loss)
 
     return (loss, per_example_loss, logits, probabilities)
@@ -255,9 +254,10 @@ def main(_):
         is_training=True,
         drop_remainder=True)
     estimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
+    estimator._export_to_tpu = FLAGS.use_tpu
     estimator.export_saved_model(
             os.path.join(FLAGS.output_dir, 'saved_model'),
-            serving_input_receiver_fn=serving_input_receiver_fn)
+            serving_input_receiver_fn=serving_input_fn)
 
   if FLAGS.do_eval:
     eval_examples = processor.get_dev_examples(FLAGS.data_dir)
